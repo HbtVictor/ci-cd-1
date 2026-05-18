@@ -23,5 +23,15 @@
   "devDependencies": {
     "eslint": "^8.57.1",
     "jest": "^30.4.2"
+  },
+  "jest": {
+    "coverageThreshold": {
+      "global": {
+        "branches": 80,
+        "functions": 80,
+        "lines": 80,
+        "statements": 80
+      }
+    }
   }
 }

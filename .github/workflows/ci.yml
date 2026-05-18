@@ -9,39 +9,53 @@ on:
   workflow_dispatch:  # Permet le déclenchement manuel depuis l'UI GitHub
 
 jobs:
-  ci:
-    name: Build, Lint & Test
-    runs-on: ubuntu-latest  # Machine virtuelle Ubuntu gratuite
-
+  # Bonus 4.1 : job lint isolé, parallèle au job test
+  lint:
+    name: Lint ESLint
+    runs-on: ubuntu-latest
     steps:
-      # Étape 1 : Télécharger le code du repo
       - name: Checkout du code
         uses: actions/checkout@v4
 
-      # Étape 2 : Installer Node.js 18
       - name: Setup Node.js 18
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'  # Cache les dépendances pour accélérer les prochains runs
+          cache: 'npm'
 
-      # Étape 3 : Installer les dépendances
       - name: Installation des dépendances
-        run: npm ci  # Plus strict que npm install : respecte package-lock.json
+        run: npm ci
 
-      # Étape 4 : Vérifier la qualité du code
       - name: Lint ESLint
         run: npm run lint
 
-      # Étape 5 : Exécuter les tests avec couverture
+  # Bonus 4.1 + 4.2 : job test parallèle, en matrice Node.js 18 et 20
+  test:
+    name: Tests unitaires (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [18, 20]  # 2 runs en parallèle
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Installation des dépendances
+        run: npm ci
+
       - name: Tests unitaires
         run: npm test
 
-      # Étape 6 : Archiver le rapport de couverture
       - name: Upload rapport de couverture
         uses: actions/upload-artifact@v4
         if: always()  # Archiver même si les tests échouent
         with:
-          name: coverage-report
+          name: coverage-report-node-${{ matrix.node-version }}
           path: coverage/
           retention-days: 7
