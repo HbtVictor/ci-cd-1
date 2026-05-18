@@ -1,7 +1,4 @@
 // src/calculator.js
-var unused_variable = 'je ne suis jamais utilisée';
-// var déclenche l'erreur no-var + no-unused-vars
-
 function add(a, b) {
   return a + b;
 }
