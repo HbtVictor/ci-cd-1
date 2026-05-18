@@ -1,43 +1,46 @@
-name: CI Pipeline
+name: CI — Lint, Tests & Coverage
 
-# Déclencheurs : s'exécute à chaque push et pull_request sur main
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'feature/**' ]
   pull_request:
     branches: [ main ]
-  workflow_dispatch:  # Permet le déclenchement manuel depuis l'UI GitHub
+  workflow_dispatch:
 
+# ─── JOB 1 : Lint ───────────────────────────────
 jobs:
-  # Bonus 4.1 : job lint isolé, parallèle au job test
   lint:
-    name: Lint ESLint
+    name: 🔍 Lint ESLint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout du code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js 18
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
+          cache: 'npm'           # ← Cache node_modules
 
       - name: Installation des dépendances
         run: npm ci
 
-      - name: Lint ESLint
+      - name: Vérification ESLint
         run: npm run lint
 
-  # Bonus 4.1 + 4.2 : job test parallèle, en matrice Node.js 18 et 20
+# ─── JOB 2 : Tests avec matrice ─────────────────
   test:
-    name: Tests unitaires (Node ${{ matrix.node-version }})
+    name: 🧪 Tests Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
+    # ← Pas de needs: ici — lint et test tournent en parallèle
+
     strategy:
+      fail-fast: false   # Ne pas annuler l'autre si l'un échoue
       matrix:
-        node-version: [18, 20]  # 2 runs en parallèle
+        node-version: [18, 20]   # 2 jobs lancés simultanément
+
     steps:
-      - name: Checkout du code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js ${{ matrix.node-version }}
@@ -49,13 +52,32 @@ jobs:
       - name: Installation des dépendances
         run: npm ci
 
-      - name: Tests unitaires
-        run: npm test
+      - name: Tests unitaires + couverture
+        run: npm run test:ci
 
       - name: Upload rapport de couverture
         uses: actions/upload-artifact@v4
-        if: always()  # Archiver même si les tests échouent
+        if: always()             # Même si les tests échouent
         with:
-          name: coverage-report-node-${{ matrix.node-version }}
+          name: coverage-node-${{ matrix.node-version }}
           path: coverage/
-          retention-days: 7
+          retention-days: 14
+
+# ─── JOB 3 : Résumé final ────────────────────────
+  ci-success:
+    name: ✅ CI complet
+    runs-on: ubuntu-latest
+    needs: [ lint, test ]   # ← Attend lint ET test
+    if: always()
+    steps:
+      - name: Vérifier que tout est vert
+        run: |
+          if [ '${{ needs.lint.result }}' != 'success' ]; then
+            echo 'Lint a échoué !'
+            exit 1
+          fi
+          if [ '${{ needs.test.result }}' != 'success' ]; then
+            echo 'Tests ont échoué !'
+            exit 1
+          fi
+          echo 'CI entièrement vert ✓'

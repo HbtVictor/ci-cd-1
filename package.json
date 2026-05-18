@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "jest --coverage",
+    "test:ci": "jest --ci --coverage",
     "test:watch": "jest --watch",
     "lint": "eslint src/**/*.js",
     "lint:fix": "eslint src/**/*.js --fix"
@@ -25,6 +26,13 @@
     "jest": "^30.4.2"
   },
   "jest": {
+    "coverageReporters": [
+      "json",
+      "json-summary",
+      "lcov",
+      "text",
+      "clover"
+    ],
     "coverageThreshold": {
       "global": {
         "branches": 80,
