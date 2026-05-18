@@ -1,0 +1,47 @@
+name: CI Pipeline
+
+# Déclencheurs : s'exécute à chaque push et pull_request sur main
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # Permet le déclenchement manuel depuis l'UI GitHub
+
+jobs:
+  ci:
+    name: Build, Lint & Test
+    runs-on: ubuntu-latest  # Machine virtuelle Ubuntu gratuite
+
+    steps:
+      # Étape 1 : Télécharger le code du repo
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      # Étape 2 : Installer Node.js 18
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'  # Cache les dépendances pour accélérer les prochains runs
+
+      # Étape 3 : Installer les dépendances
+      - name: Installation des dépendances
+        run: npm ci  # Plus strict que npm install : respecte package-lock.json
+
+      # Étape 4 : Vérifier la qualité du code
+      - name: Lint ESLint
+        run: npm run lint
+
+      # Étape 5 : Exécuter les tests avec couverture
+      - name: Tests unitaires
+        run: npm test
+
+      # Étape 6 : Archiver le rapport de couverture
+      - name: Upload rapport de couverture
+        uses: actions/upload-artifact@v4
+        if: always()  # Archiver même si les tests échouent
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 7

@@ -1,0 +1,27 @@
+{
+  "name": "ci-cd-1",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/**/*.js",
+    "lint:fix": "eslint src/**/*.js --fix"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HbtVictor/ci-cd-1.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/HbtVictor/ci-cd-1/issues"
+  },
+  "homepage": "https://github.com/HbtVictor/ci-cd-1#readme",
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "jest": "^30.4.2"
+  }
+}
