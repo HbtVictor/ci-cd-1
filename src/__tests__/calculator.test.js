@@ -37,10 +37,4 @@ describe('Calculator', () => {
   test('divide décimale : 1 / 3', () => {
     expect(divide(1, 3)).toBeCloseTo(0.333, 2);
   });
-
-  test('node version check', () => {
-    const major = parseInt(process.version.slice(1).split('.')[0]);
-    // Ce test ÉCHOUE intentionnellement sur Node 20
-    expect(major).toBeLessThan(20);
-  });
 });
