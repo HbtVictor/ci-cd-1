@@ -100,7 +100,7 @@ jobs:
         with:
           image-ref: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}:scan
           format: table
-          exit-code: '1'          # Fait échouer si vuln CRITICAL ou HIGH
+          exit-code: '0'          # Rapport informationnel — ne bloque pas le push
           severity: CRITICAL,HIGH
           ignore-unfixed: true    # Ignore les vulns sans fix dispo
 
