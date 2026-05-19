@@ -37,7 +37,7 @@ jobs:
     name: 🧪 Tests — Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         node-version: [18, 20]
 
