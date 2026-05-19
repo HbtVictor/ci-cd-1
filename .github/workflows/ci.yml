@@ -1,95 +1,91 @@
-name: CI — Lint, Tests & Coverage
+name: CI/CD — Tests, Build & Push Docker
 
 on:
   push:
-    branches: [main, 'feature/**']
-    paths:
-      - 'src/**'
-      - 'package*.json'
-      - '.github/workflows/**'
-      - '.github/actions/**'
-      - '.eslintrc.json'
+    branches: [ main ]
   pull_request:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'package*.json'
-      - '.github/workflows/**'
-      - '.github/actions/**'
-      - '.eslintrc.json'
-  workflow_dispatch:
+    branches: [ main ]
 
-# Annule les runs obsolètes sur la même branche
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}   # user/mon-premier-cicd
 
 jobs:
-
-  # ── JOB 1 : Lint (utilise la composite action setup-node-cached) ──
+  # ─── JOB 1 : Lint ─────────────────────────────────
   lint:
-    name: 🔍 Lint ESLint
+    name: 🔍 Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '18', cache: 'npm' }
+      - run: npm ci
+      - run: npm run lint
 
-      - name: Setup Node + cache + install
-        uses: ./.github/actions/setup-node-cached
-        with:
-          node-version: '18'
-
-      - name: Vérification ESLint
-        run: npm run lint
-
-  # ── JOB 2 : Tests délégués au reusable workflow ────────
+  # ─── JOB 2 : Tests ────────────────────────────────
   test:
     name: 🧪 Tests
-    uses: ./.github/workflows/test-reusable.yml
-    with:
-      node-versions: '[18, 20]'
-      coverage-threshold: 80
-
-  # ── JOB 3 : Rapport consolidé ─────────────────────────
-  report:
-    name: 📊 Rapport Coverage
     runs-on: ubuntu-latest
-    needs: [lint, test]
-    if: always()
-
+    strategy:
+      matrix:
+        node-version: [18, 20]
     steps:
       - uses: actions/checkout@v4
-
-      - name: Télécharger tous les rapports
-        uses: actions/download-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          pattern: coverage-node-*
-          merge-multiple: false
-          path: all-coverage/
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run test:ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-node-${{ matrix.node-version }}
+          path: coverage/
 
-      - name: Afficher le résumé dans Step Summary
-        run: |
-          echo '## 📊 Rapport de Couverture' >> $GITHUB_STEP_SUMMARY
-          echo '' >> $GITHUB_STEP_SUMMARY
-          echo '| Version | Statements | Branches | Functions | Lines |' >> $GITHUB_STEP_SUMMARY
-          echo '|---------|-----------|---------|----------|-------|' >> $GITHUB_STEP_SUMMARY
-          for dir in all-coverage/coverage-node-*/; do
-            version=$(basename $dir | sed 's/coverage-node-//')
-            summary="$dir/coverage-summary.json"
-            if [ -f "$summary" ]; then
-              node -e "
-                const d=JSON.parse(require('fs').readFileSync('$summary','utf8')).total;
-                console.log('| Node '+$version+' | '+d.statements.pct+'% | '+d.branches.pct+'% | '+d.functions.pct+'% | '+d.lines.pct+'% |');
-              " >> $GITHUB_STEP_SUMMARY
-            fi
-          done
+  # ─── JOB 3 : Build & Push Docker ──────────────────
+  docker:
+    name: 🐳 Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: [ lint, test ]        # Attend lint ET test
+    if: github.ref == 'refs/heads/main'   # Seulement sur main
+    permissions:
+      contents: read
+      packages: write              # Nécessaire pour pusher sur GHCR
 
-      - name: Résultat global CI
-        run: |
-          lint_ok='${{ needs.lint.result }}'
-          test_ok='${{ needs.test.result }}'
-          echo "Lint: $lint_ok  |  Tests: $test_ok"
-          if [ "$lint_ok" != 'success' ] || [ "$test_ok" != 'success' ]; then
-            echo '❌ CI échoué' >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-          echo '✅ CI complet — tous les jobs sont verts' >> $GITHUB_STEP_SUMMARY
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login sur GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image name en lowercase (requis par GHCR)
+        id: img
+        run: echo "name=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+      - name: Extraire les métadonnées (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.img.outputs.name }}
+          tags: |
+            type=sha,prefix=sha-
+            type=raw,value=latest
+
+      - name: Build & Push l'image Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha    # Cache GitHub Actions
+          cache-to: type=gha,mode=max
