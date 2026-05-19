@@ -2,25 +2,29 @@ name: CI — Lint, Tests & Coverage
 
 on:
   push:
-    branches: [ main, 'feature/**' ]
+    branches: [main, 'feature/**']
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
 
-# ─── JOB 1 : Lint ───────────────────────────────
+# Annule les runs obsolètes sur la même branche
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+
+  # ── JOB 1 : Lint ──────────────────────────────────────
   lint:
     name: 🔍 Lint ESLint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js 18
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'           # ← Cache node_modules
+          cache: 'npm'
 
       - name: Installation des dépendances
         run: npm ci
@@ -28,20 +32,17 @@ jobs:
       - name: Vérification ESLint
         run: npm run lint
 
-# ─── JOB 2 : Tests avec matrice ─────────────────
+  # ── JOB 2 : Tests avec matrix ─────────────────────────
   test:
-    name: 🧪 Tests Node.js ${{ matrix.node-version }}
+    name: 🧪 Tests — Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
-    # ← Pas de needs: ici — lint et test tournent en parallèle
-
     strategy:
-      fail-fast: false   # Ne pas annuler l'autre si l'un échoue
+      fail-fast: false
       matrix:
-        node-version: [18, 20]   # 2 jobs lancés simultanément
+        node-version: [18, 20]
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -55,46 +56,55 @@ jobs:
       - name: Tests unitaires + couverture
         run: npm run test:ci
 
-      - name: Résumé de couverture
-        if: always()
-        run: |
-          echo '## 📊 Couverture de code — Node ${{ matrix.node-version }}' >> $GITHUB_STEP_SUMMARY
-          if [ -f coverage/coverage-summary.json ]; then
-            cat coverage/coverage-summary.json | node -e "
-              const data = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
-              const t = data.total;
-              console.log('| Metric | Coverage |');
-              console.log('|--------|----------|');
-              console.log('| Statements | ' + t.statements.pct + '% |');
-              console.log('| Branches | ' + t.branches.pct + '% |');
-              console.log('| Functions | ' + t.functions.pct + '% |');
-              console.log('| Lines | ' + t.lines.pct + '% |');
-            " >> $GITHUB_STEP_SUMMARY
-          fi
-
       - name: Upload rapport de couverture
         uses: actions/upload-artifact@v4
-        if: always()             # Même si les tests échouent
+        if: always()
         with:
           name: coverage-node-${{ matrix.node-version }}
           path: coverage/
           retention-days: 14
 
-# ─── JOB 3 : Résumé final ────────────────────────
-  ci-success:
-    name: ✅ CI complet
+  # ── JOB 3 : Rapport consolidé ─────────────────────────
+  report:
+    name: 📊 Rapport Coverage
     runs-on: ubuntu-latest
-    needs: [ lint, test ]   # ← Attend lint ET test
+    needs: [lint, test]
     if: always()
+
     steps:
-      - name: Vérifier que tout est vert
+      - uses: actions/checkout@v4
+
+      - name: Télécharger tous les rapports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-node-*
+          merge-multiple: false
+          path: all-coverage/
+
+      - name: Afficher le résumé dans Step Summary
         run: |
-          if [ '${{ needs.lint.result }}' != 'success' ]; then
-            echo 'Lint a échoué !'
+          echo '## 📊 Rapport de Couverture' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo '| Version | Statements | Branches | Functions | Lines |' >> $GITHUB_STEP_SUMMARY
+          echo '|---------|-----------|---------|----------|-------|' >> $GITHUB_STEP_SUMMARY
+          for dir in all-coverage/coverage-node-*/; do
+            version=$(basename $dir | sed 's/coverage-node-//')
+            summary="$dir/coverage-summary.json"
+            if [ -f "$summary" ]; then
+              node -e "
+                const d=JSON.parse(require('fs').readFileSync('$summary','utf8')).total;
+                console.log('| Node '+$version+' | '+d.statements.pct+'% | '+d.branches.pct+'% | '+d.functions.pct+'% | '+d.lines.pct+'% |');
+              " >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+      - name: Résultat global CI
+        run: |
+          lint_ok='${{ needs.lint.result }}'
+          test_ok='${{ needs.test.result }}'
+          echo "Lint: $lint_ok  |  Tests: $test_ok"
+          if [ "$lint_ok" != 'success' ] || [ "$test_ok" != 'success' ]; then
+            echo '❌ CI échoué' >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-          if [ '${{ needs.test.result }}' != 'success' ]; then
-            echo 'Tests ont échoué !'
-            exit 1
-          fi
-          echo 'CI entièrement vert ✓'
+          echo '✅ CI complet — tous les jobs sont verts' >> $GITHUB_STEP_SUMMARY
