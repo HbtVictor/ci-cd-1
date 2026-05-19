@@ -1,0 +1,46 @@
+name: Reusable — Tests
+
+on:
+  workflow_call:
+    inputs:
+      node-versions:
+        type: string
+        default: '[18, 20]'
+      coverage-threshold:
+        type: number
+        default: 80
+
+jobs:
+  test:
+    name: 🧪 Tests — Node.js ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ${{ fromJSON(inputs.node-versions) }}
+
+    steps:
+      # Utilise la composite action : checkout + setup-node + npm ci en 1 step
+      - uses: actions/checkout@v4
+
+      - name: Setup Node + cache + install
+        uses: ./.github/actions/setup-node-cached
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Tests unitaires + couverture
+        run: npm run test:ci
+
+      - name: Vérifier seuil de couverture
+        run: |
+          PCT=$(node -e "const d=JSON.parse(require('fs').readFileSync('coverage/coverage-summary.json','utf8')); console.log(d.total.lines.pct);")
+          echo "Coverage lines: $PCT% (seuil: ${{ inputs.coverage-threshold }}%)"
+          node -e "process.exit($PCT < ${{ inputs.coverage-threshold }} ? 1 : 0)"
+
+      - name: Upload rapport de couverture
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-node-${{ matrix.node-version }}
+          path: coverage/
+          retention-days: 14

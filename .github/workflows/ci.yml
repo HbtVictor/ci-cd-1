@@ -3,8 +3,20 @@ name: CI — Lint, Tests & Coverage
 on:
   push:
     branches: [main, 'feature/**']
+    paths:
+      - 'src/**'
+      - 'package*.json'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.eslintrc.json'
   pull_request:
     branches: [main]
+    paths:
+      - 'src/**'
+      - 'package*.json'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.eslintrc.json'
   workflow_dispatch:
 
 # Annule les runs obsolètes sur la même branche
@@ -14,55 +26,28 @@ concurrency:
 
 jobs:
 
-  # ── JOB 1 : Lint ──────────────────────────────────────
+  # ── JOB 1 : Lint (utilise la composite action setup-node-cached) ──
   lint:
     name: 🔍 Lint ESLint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node + cache + install
+        uses: ./.github/actions/setup-node-cached
         with:
           node-version: '18'
-          cache: 'npm'
-
-      - name: Installation des dépendances
-        run: npm ci
 
       - name: Vérification ESLint
         run: npm run lint
 
-  # ── JOB 2 : Tests avec matrix ─────────────────────────
+  # ── JOB 2 : Tests délégués au reusable workflow ────────
   test:
-    name: 🧪 Tests — Node.js ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [18, 20]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'npm'
-
-      - name: Installation des dépendances
-        run: npm ci
-
-      - name: Tests unitaires + couverture
-        run: npm run test:ci
-
-      - name: Upload rapport de couverture
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: coverage-node-${{ matrix.node-version }}
-          path: coverage/
-          retention-days: 14
+    name: 🧪 Tests
+    uses: ./.github/workflows/test-reusable.yml
+    with:
+      node-versions: '[18, 20]'
+      coverage-threshold: 80
 
   # ── JOB 3 : Rapport consolidé ─────────────────────────
   report:

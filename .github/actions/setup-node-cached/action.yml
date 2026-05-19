@@ -1,0 +1,19 @@
+name: Setup Node Cached
+description: Checkout + setup-node + npm ci en une action
+
+inputs:
+  node-version:
+    description: Version de Node.js
+    required: true
+    default: '18'
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+    - run: npm ci
+      shell: bash
