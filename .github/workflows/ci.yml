@@ -10,6 +10,7 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}   # user/mon-premier-cicd
+  RENDER_APP_URL: https://ci-cd-1-sjcw.onrender.com   # URL publique service Render (option B : 1 service partagé staging+prod)
 
 jobs:
   # ─── JOB 1 : Lint ─────────────────────────────────
@@ -114,3 +115,157 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ─── JOB 4 : Deploy STAGING (automatique) ─────────
+  deploy-staging:
+    name: 🚀 Deploy Staging
+    runs-on: ubuntu-latest
+    needs: [ docker ]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: staging
+      url: ${{ env.RENDER_APP_URL }}
+
+    steps:
+      - name: Déclencher le déploiement Render via Deploy Hook
+        run: |
+          echo "::group::Trigger Render deploy"
+          HTTP_CODE=$(curl -s -o /tmp/render_response.txt -w "%{http_code}" -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}")
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/render_response.txt || true
+          echo ""
+          echo "::endgroup::"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "❌ Deploy hook a renvoyé $HTTP_CODE"
+            exit 1
+          fi
+
+      - name: Attendre la fin du déploiement Render
+        run: |
+          # Render ne renvoie pas d'ID de build via webhook → on poll /health
+          echo "Attente du redémarrage de l'app (jusqu'à 5 min)…"
+          for i in $(seq 1 30); do
+            sleep 10
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.RENDER_APP_URL }}/health" || echo "000")
+            echo "Try $i/30 — /health → $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "✅ Service répond (200)"
+              break
+            fi
+          done
+
+      - name: Health check staging
+        run: |
+          echo "::group::Health check"
+          RESP=$(curl -fsS "${{ env.RENDER_APP_URL }}/health")
+          echo "$RESP"
+          echo "::endgroup::"
+          # Vérifie que la réponse contient bien "status":"ok"
+          echo "$RESP" | grep -q '"status":"ok"' || { echo "❌ /health ne contient pas status:ok"; exit 1; }
+          echo "✅ Staging health check OK"
+
+      - name: Test endpoint /calc
+        run: |
+          RESP=$(curl -fsS "${{ env.RENDER_APP_URL }}/calc/add/5/3")
+          echo "Réponse : $RESP"
+          echo "$RESP" | grep -q '"result":8' || { echo "❌ /calc/add/5/3 ne retourne pas 8"; exit 1; }
+          echo "✅ Endpoint /calc OK"
+
+      - name: Step Summary staging
+        if: always()
+        run: |
+          echo "## 🚀 Staging déployé" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL** : ${{ env.RENDER_APP_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health check** : ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # ─── JOB 5 : Deploy PRODUCTION (approbation manuelle) ─────────
+  deploy-production:
+    name: 🏁 Deploy Production
+    runs-on: ubuntu-latest
+    needs: [ deploy-staging ]  # ← bloque prod si staging a échoué
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: ${{ env.RENDER_APP_URL }}
+
+    steps:
+      - name: Déclencher le déploiement Render via Deploy Hook
+        run: |
+          echo "::group::Trigger Render deploy"
+          HTTP_CODE=$(curl -s -o /tmp/render_response.txt -w "%{http_code}" -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}")
+          echo "HTTP $HTTP_CODE"
+          cat /tmp/render_response.txt || true
+          echo ""
+          echo "::endgroup::"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "❌ Deploy hook a renvoyé $HTTP_CODE"
+            exit 1
+          fi
+
+      - name: Attendre la fin du déploiement Render
+        run: |
+          echo "Attente du redémarrage de l'app (jusqu'à 5 min)…"
+          for i in $(seq 1 30); do
+            sleep 10
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.RENDER_APP_URL }}/health" || echo "000")
+            echo "Try $i/30 — /health → $CODE"
+            if [ "$CODE" = "200" ]; then
+              echo "✅ Service répond (200)"
+              break
+            fi
+          done
+
+      - name: Health check production
+        run: |
+          echo "::group::Health check"
+          RESP=$(curl -fsS "${{ env.RENDER_APP_URL }}/health")
+          echo "$RESP"
+          echo "::endgroup::"
+          echo "$RESP" | grep -q '"status":"ok"' || { echo "❌ /health ne contient pas status:ok"; exit 1; }
+          echo "✅ Production health check OK"
+
+      - name: Step Summary production
+        if: always()
+        run: |
+          echo "## 🏁 Production déployée" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL** : ${{ env.RENDER_APP_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit** : \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Health check** : ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+
+  # ─── JOB 6 : Notify (résumé global) ─────────
+  notify:
+    name: 📣 Notify
+    runs-on: ubuntu-latest
+    needs: [ lint, test, docker, deploy-staging, deploy-production ]
+    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Résumé global dans le Step Summary
+        run: |
+          echo "## 📊 Pipeline complet — ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Étape | Statut |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔍 Lint | ${{ needs.lint.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🧪 Tests | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐳 Docker | ${{ needs.docker.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🚀 Staging | ${{ needs.deploy-staging.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🏁 Production | ${{ needs.deploy-production.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**URL de l'app** : ${{ env.RENDER_APP_URL }}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Statut final
+        run: |
+          # Échoue si l'un des jobs en amont a échoué (le pipeline est rouge)
+          if [ "${{ needs.lint.result }}" != "success" ] \
+              || [ "${{ needs.test.result }}" != "success" ] \
+              || [ "${{ needs.docker.result }}" != "success" ] \
+              || [ "${{ needs.deploy-staging.result }}" != "success" ] \
+              || [ "${{ needs.deploy-production.result }}" != "success" ]; then
+            echo "❌ Pipeline en échec"
+            exit 1
+          fi
+          echo "✅ Pipeline complet : tout est vert, prod déployée"

@@ -126,11 +126,15 @@ Quand utiliser secrets :
 
 **Q4 — Paramètres choisis pour l'environnement `staging`**
 
-*(À remplir une fois la configuration faite dans Settings → Environments)*
+- **Aucune protection rule activée** (ni *required reviewers*, ni *wait timer*) → le déploiement en staging doit être **automatique** dès qu'un push sur `main` passe les tests, pour permettre une boucle de feedback rapide entre les commits et la validation en condition réelle.
+- **Deployment branches** restreintes à `main` → seul ce qui est validé via PR/CI peut atteindre staging, pas une branche feature locale.
+- Pas de secret d'environnement spécifique à ce stade — sera ajouté à l'étape 3 (`RENDER_STAGING_HOOK`).
 
 **Q5 — Reviewer désigné pour `production`**
 
-*(À remplir une fois la configuration faite)*
+Reviewer = **moi-même (`HbtVictor`)** parce que c'est un projet perso et qu'il n'y a pas d'équipe.
+
+Dans un contexte réel d'équipe, le reviewer ne serait jamais le développeur qui a ouvert la PR (règle des *4-eyes*) : ce serait le **lead dev**, ou un binôme (PR review), ou idéalement deux reviewers obligatoires sur la production. L'idée fondamentale : aucun développeur ne déploie son propre code en prod sans qu'un autre humain valide les changements en aval des tests automatisés. Ça force aussi un partage de connaissance (le reviewer apprend ce qui change) et limite le risque d'erreur ou de malveillance.
 
 **Q6 — Scénario d'utilisation du wait timer**
 
@@ -138,11 +142,50 @@ Un wait timer de 10 minutes serait utile **le vendredi soir** ou en **fin de jou
 
 ### 2.2 — Intégration dans le pipeline
 
-**Q7 — Structure du job `deploy-staging`** *(à remplir après modification du workflow)*
+**Q7 — Structure du job `deploy-staging`**
 
-**Q8 — Comportement observé sur Actions** *(à remplir après push d'un commit)*
+```yaml
+deploy-staging:
+  name: 🚀 Deploy Staging
+  runs-on: ubuntu-latest
+  needs: [ docker ]                       # attend que l'image Docker soit buildée + pushée sur GHCR
+  if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  environment:
+    name: staging
+    url: ${{ env.RENDER_APP_URL }}         # affiche l'URL cliquable sur la page du job
 
-**Q9 — Comportement si refus du reviewer** *(à remplir après expérimentation)*
+  steps:
+    - run: curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"    # déclenche le redéploiement Render
+    - run: ...poll /health pendant 5 min, échec si pas 200...
+    - run: ...vérifie status:ok ET endpoint /calc...
+```
+
+- `needs: [ docker ]` — staging ne démarre que si lint, test ET docker sont verts (`docker` lui-même a `needs: [lint, test]`).
+- `environment: name: staging` — rattache le job à l'environnement GitHub `staging`, ce qui (1) injecte le secret `RENDER_DEPLOY_HOOK` du bon environnement (2) affiche le déploiement dans l'onglet *Environments* du repo.
+- `run:` — appel POST sur le Deploy Hook Render (curl). Render relit le repo, rebuild le Dockerfile, redémarre le conteneur. Le script poll ensuite `/health` jusqu'à recevoir un 200 ou timeout (5 min max).
+
+**Q8 — Comportement observé sur Actions**
+
+À chaque push sur `main` :
+1. `lint`, `test (18)`, `test (20)` démarrent en parallèle.
+2. Quand tout est vert, `docker` démarre (build + scan Trivy + push GHCR).
+3. Quand docker est vert, `deploy-staging` démarre automatiquement (environnement staging = aucune protection rule).
+4. Quand staging est vert, `deploy-production` apparaît dans la UI Actions avec le statut **`Waiting`**. GitHub envoie un email/notification au reviewer configuré (moi).
+5. Sur la page du run, un bouton **`Review deployments`** s'affiche en haut. Clic dessus → modal listant l'environnement `production` → checkbox + bouton **`Approve and deploy`** ou **`Reject`**.
+6. Si j'approuve : `deploy-production` démarre, déclenche le Deploy Hook, attend `/health`, valide, finit vert.
+7. Le job `notify` affiche le tableau récapitulatif final dans le Step Summary.
+
+L'approbation est demandée **précisément** au moment où `deploy-staging` finit avec succès et où `deploy-production` essaie de démarrer (juste après ses `needs:` satisfaits).
+
+**Q9 — Comportement si refus du reviewer**
+
+J'ai testé en cliquant **Reject** :
+- Le job `deploy-production` reste à l'état `Rejected` (croix rouge spécifique, différente de `Failed`).
+- Le pipeline entier est marqué en échec dans la liste des runs.
+- Le job n'est **pas perdu** : sur la page du run, il y a un bouton **`Re-run jobs`** → on peut choisir de re-runner uniquement les jobs qui ont échoué, ce qui redéclenche l'approbation production. Le reviewer peut alors `Approve` la deuxième fois.
+- Variante : `git push` un nouveau commit relance tout le pipeline depuis le début (un nouveau déploiement à valider).
+
+Conclusion : le refus est **bloquant mais réversible**, ce qui correspond bien au cas d'usage "stop, on ne déploie pas tel quel, mais on n'a pas perdu le travail CI".
 
 ---
 
@@ -150,9 +193,26 @@ Un wait timer de 10 minutes serait utile **le vendredi soir** ou en **fin de jou
 
 ### 3.1 — Configuration Render
 
-**Q10 — Les 4 informations configurées dans Render** *(à remplir)*
+**Q10 — Les 4 informations configurées dans Render**
 
-**Q11 — URL publique de l'application + endpoint `/health`** *(à remplir)*
+| Information | Valeur | Pourquoi Render en a besoin |
+|---|---|---|
+| **Repository** | `HbtVictor/ci-cd-1` | Pour cloner le code source à chaque déploiement. Render observe ce repo (ou se contente du Deploy Hook si auto-deploy est désactivé). |
+| **Branch** | `main` | Indique quelle branche déployer. Sans ça, Render ne sait pas si tu veux la prod (`main`) ou une preview (`develop`, `feature/*`). |
+| **Language / Runtime** | `Docker` | Indique à Render comment builder. En `Docker`, il utilise notre `Dockerfile` ; en `Node`, il aurait essayé de deviner les commandes `npm install && npm start`, ce qui aurait ignoré nos optimisations multi-stage et les tests dans le builder stage. |
+| **Health Check Path** | `/health` | Route que Render appelle pour valider que le conteneur démarre correctement. Si `/health` ne répond pas 200 dans le délai, Render considère le déploiement échoué et garde la version précédente en route. |
+
+(Note : l'instance type `Free` et la region `Frankfurt` sont aussi configurées, mais ce sont des choix de pricing/performance plus que des informations nécessaires au build.)
+
+**Q11 — URL publique et endpoint `/health`**
+
+- **URL publique** : `https://ci-cd-1-sjcw.onrender.com`
+- **Validation `/health`** : `curl https://ci-cd-1-sjcw.onrender.com/health` → `{"status":"ok","version":"1.0.0"}` (HTTP 200).
+- **Ce qui a été configuré pour que `/health` fonctionne** :
+  1. Le code Express dans `src/server.js` expose la route : `app.get('/health', (req, res) => res.json({ status: 'ok', version: '1.0.0' }))`.
+  2. Le Dockerfile expose `EXPOSE 3000` et lance `node src/server.js` en `CMD`.
+  3. L'app écoute sur `process.env.PORT || 3000` — important parce que Render impose son propre port via la variable `PORT` (généralement 10000). Sans cette ligne, l'app écouterait sur 3000 alors que Render attend sur le port qu'il a injecté.
+  4. Render est configuré avec **Health Check Path** = `/health` dans Settings.
 
 **Q12 — Deux solutions pour éviter le cold start gratuit**
 
@@ -163,9 +223,52 @@ Autres options : utiliser un **CDN avec edge function** (Cloudflare Workers) qui
 
 ### 3.2 — Connecter GitHub Actions à Render
 
-**Q13 — Approche choisie** *(à remplir : Deploy Hook ou autoDeploy)*
+**Q13 — Approche choisie : Deploy Hook**
 
-**Q14 — Health-check post-déploiement** *(à remplir après implémentation)*
+J'ai choisi le **Deploy Hook**, pas l'autoDeploy de Render. Raisons :
+1. Avec autoDeploy, Render redéploierait à **chaque push**, même sur des commits qui n'ont pas passé les tests CI → on perd la garantie "rouge = pas déployé".
+2. Le Deploy Hook permet de mettre le déploiement **après** les jobs `lint`, `test`, `docker` dans le pipeline (`needs:`) — donc on a la chaîne complète tests → build → déploiement.
+3. Le Deploy Hook permet de séparer **staging** et **production** avec une approbation manuelle entre les deux (`environment:` GitHub avec required reviewers). Impossible à faire proprement avec autoDeploy.
+
+Étapes de configuration suivies :
+1. Render Service → Settings → section **Deploy Hook** → copier l'URL secrète (forme `https://api.render.com/deploy/srv-XXX?key=YYY`).
+2. GitHub → Settings → Environments → `staging` → Environment secrets → ajouter `RENDER_DEPLOY_HOOK` avec l'URL.
+3. Idem pour l'environnement `production` (option B : même URL dans les 2 envs car un seul service Render).
+4. Désactiver `Auto-Deploy` dans Render (sinon double déploiement à chaque push).
+5. Dans `ci.yml`, ajouter le job `deploy-staging` qui exécute `curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK }}"`.
+
+**Q14 — Health-check post-déploiement**
+
+Implémentation en 3 steps dans le job `deploy-staging` (et idem dans `deploy-production`) :
+
+```yaml
+- name: Attendre la fin du déploiement Render
+  run: |
+    for i in $(seq 1 30); do
+      sleep 10
+      CODE=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.RENDER_APP_URL }}/health" || echo "000")
+      echo "Try $i/30 — /health → $CODE"
+      if [ "$CODE" = "200" ]; then break; fi
+    done
+
+- name: Health check staging
+  run: |
+    RESP=$(curl -fsS "${{ env.RENDER_APP_URL }}/health")
+    echo "$RESP" | grep -q '"status":"ok"' || exit 1
+
+- name: Test endpoint /calc
+  run: |
+    RESP=$(curl -fsS "${{ env.RENDER_APP_URL }}/calc/add/5/3")
+    echo "$RESP" | grep -q '"result":8' || exit 1
+```
+
+**Logique** :
+1. **Polling** : on attend jusqu'à 5 min (30 tentatives × 10s) que `/health` réponde 200, car Render met du temps à redémarrer le conteneur après un Deploy Hook.
+2. **Validation contenu** : on vérifie que le JSON contient bien `"status":"ok"` (pas juste un 200 d'une vieille page d'erreur).
+3. **Test fonctionnel** : on appelle `/calc/add/5/3` pour s'assurer que pas seulement Express tourne, mais aussi que la logique métier est en place.
+4. **Échec → pipeline rouge** : `curl -fsS` (--fail) ou `grep -q ... || exit 1` font échouer le job si quoi que ce soit cloche.
+
+Conséquence : si le déploiement Render est OK mais que l'app a un bug qui fait crasher `/health`, le pipeline passe au rouge et le job suivant (`deploy-production`) ne démarre pas grâce à `needs: [deploy-staging]`.
 
 **Q15 — Comparaison autoDeploy vs Deploy Hook**
 
@@ -183,13 +286,44 @@ Autres options : utiliser un **CDN avec edge function** (Cloudflare Workers) qui
 
 ---
 
-## Notes — Setup manuel restant
+## Notes — Setup réalisé
 
-- [ ] EX.2.1 — Créer environnement `staging` (auto-deploy, branche `main`)
-- [ ] EX.2.1 — Créer environnement `production` (required reviewer = moi, wait timer optionnel)
-- [ ] EX.3.1 — Créer compte Render (login GitHub)
-- [ ] EX.3.1 — Créer Web Service sur Render, le connecter au repo
-- [ ] EX.3.2 — Récupérer le Deploy Hook URL Render
-- [ ] EX.3.2 — Créer secret `RENDER_STAGING_HOOK` dans env staging
-- [ ] EX.3.2 — Créer secret `RENDER_PROD_HOOK` dans env production
-- [ ] EX.2.2 / EX.3.2 — Modifier `ci.yml` pour ajouter jobs `deploy-staging` et `deploy-production`
+- [x] EX.2.1 — Environnement `staging` créé (aucune protection rule, branche `main`)
+- [x] EX.2.1 — Environnement `production` créé (required reviewer = `HbtVictor`)
+- [x] EX.3.1 — Compte Render créé via login GitHub
+- [x] EX.3.1 — Web Service `ci-cd-1` créé (Docker, branche `main`, Frankfurt, plan Free, `/health` health check path, auto-deploy OFF)
+- [x] EX.3.2 — Deploy Hook récupéré dans Render Settings
+- [x] EX.3.2 — Secret `RENDER_DEPLOY_HOOK` créé dans l'environnement `staging`
+- [x] EX.3.2 — Secret `RENDER_DEPLOY_HOOK` créé dans l'environnement `production` (option B : même valeur, un seul service Render)
+- [x] EX.2.2 / EX.3.2 — `ci.yml` modifié : ajout des jobs `deploy-staging`, `deploy-production`, `notify` avec health-checks
+
+## Architecture finale du pipeline (Challenge inclus)
+
+```
+push main
+  │
+  ├──▶ 🔍 lint
+  ├──▶ 🧪 test (Node 18)
+  ├──▶ 🧪 test (Node 20)
+  │       │
+  │       ▼ (lint + test verts)
+  │     🐳 docker (build + Trivy + push GHCR)
+  │       │
+  │       ▼
+  │     🚀 deploy-staging  ◀── environment: staging (auto)
+  │         │  curl deploy hook → poll /health → vérif /calc
+  │         ▼
+  │     🏁 deploy-production  ◀── environment: production (required reviewer)
+  │         │  ⏸️ APPROUVÉ par HbtVictor
+  │         │  curl deploy hook → poll /health
+  │         ▼
+  │     📣 notify (Step Summary récapitulatif)
+```
+
+**Caractéristiques** :
+- Tests bloquants : si lint OU test échoue, le docker ne build pas, le déploiement n'a pas lieu.
+- Image Docker poussée sur GHCR **avant** le déploiement → on déploie une image traçable, pas juste un commit.
+- Staging déployé automatiquement après build.
+- Production bloquée jusqu'à approbation manuelle (`environment: production` + protection rule).
+- Health-checks bloquants après chaque déploiement : si `/health` ne répond pas 200 ou ne contient pas `status:ok`, le job échoue et le pipeline passe rouge.
+- Job `notify` consolide le statut de tout le pipeline dans le **Step Summary** (visible dans la UI Actions).
