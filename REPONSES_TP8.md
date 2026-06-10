@@ -206,7 +206,132 @@ l'image Docker ni déployer.
 
 ### 2.2 — Trivy
 
-_À compléter après mise en place du job security._
+**Q6 — Job `security` Trivy**
+
+J'ai créé un job dédié `security` dans `ci.yml` qui scanne l'image Docker fraîchement
+poussée sur GHCR par le job `docker`. Architecture :
+
+```yaml
+security:
+  name: 🛡️ Security scan (Trivy)
+  runs-on: ubuntu-latest
+  needs: [ docker ]
+  permissions:
+    contents: read
+    packages: read           # pull image privée
+    security-events: write   # upload SARIF
+  steps:
+    - uses: actions/checkout@v4
+    - uses: docker/login-action@v3 (login GHCR)
+    - uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ needs.docker.outputs.image_ref }}
+        format: table
+        exit-code: '1'          # BLOQUANT
+        severity: CRITICAL,HIGH
+        ignore-unfixed: true
+    - uses: aquasecurity/trivy-action@master  # 2e run : SARIF
+      with:
+        format: sarif
+        output: trivy-results.sarif
+    - uses: github/codeql-action/upload-sarif@v3
+```
+
+**Paramètres choisis et justifications** :
+
+- **`image-ref`** = image taguée `sha-XXXXXXX` qui vient d'être pushée sur GHCR.
+  Le job `docker` expose un `output` `image_ref` calculé à partir du SHA git court. Trivy
+  scanne donc **exactement** la version qui sera déployée — pas une approximation locale.
+- **`format: table`** pour la sortie dans les logs Actions (lisible humainement).
+- **`exit-code: '1'`** : le job échoue (= le pipeline échoue) si Trivy trouve au moins une
+  CVE matchant les critères. C'est la posture sécurité la plus stricte.
+- **`severity: CRITICAL,HIGH`** : on bloque sur ces deux niveaux seulement. Les MEDIUM et
+  LOW sont trop fréquentes (transitives, faibles impacts) pour bloquer un pipeline → trop de
+  bruit, équipe finit par ignorer les alertes.
+- **`ignore-unfixed: true`** : ne signale que les CVE pour lesquelles un patch existe (voir Q8).
+- **Deuxième run Trivy en `format: sarif`** : génère un rapport structuré uploadé dans
+  l'onglet **Security** du repo GitHub (Code scanning alerts). Permet aux mainteneurs de voir
+  l'historique des vulns détectées, leurs status (open/dismissed/fixed), et de filtrer par
+  branche.
+
+**Q7 — Pourquoi `needs: [docker]` (et pas avant) ?**
+
+L'ordre est **obligatoire** parce que Trivy a besoin de l'**image Docker construite et
+disponible** pour la scanner. Sans le job `docker` qui build et push l'image sur GHCR, il
+n'y a tout simplement rien à scanner.
+
+Sequence détaillée :
+
+1. `docker` : build l'image avec `docker build`, push sur GHCR avec le tag `sha-XXXXXXX`.
+2. `security` : `docker login` sur GHCR, puis Trivy fait un `docker pull` interne sur l'image
+   tagué `sha-XXXXXXX`, scanne tous les layers (OS + npm packages + secrets).
+3. Si HIGH ou CRITICAL → `security` échoue → `deploy-staging` (qui a `needs: [docker,
+   security]`) ne démarre pas → pas de déploiement d'image vulnérable.
+
+**Pourquoi pas scanner avant le build ?** Trivy peut scanner un **Dockerfile** ou un
+**filesystem** sans image construite, mais ces modes :
+
+- Ne détectent pas les vulnérabilités liées à l'image de base **après** un build (chaque
+  rebuild peut tirer une version `:18-alpine` différente).
+- Ne voient pas les paquets installés via `RUN apt-get install …` ou `RUN apk add …`.
+- Ne scannent pas les fichiers générés au build (résultats de `npm ci`).
+
+→ On scanne **l'image finale**, c'est-à-dire **après** le job `docker`.
+
+**Pourquoi pas après le déploiement ?** Si Trivy détecte une faille critique alors que
+l'image est déjà en staging/prod, c'est trop tard : la version vulnérable tourne déjà
+exposée aux utilisateurs. La règle est **shift-left** : scanner le plus tôt possible dans
+le pipeline, mais après que l'artefact réel soit construit.
+
+**Q8 — 3 CVE HIGH dans `node:18-alpine` non corrigibles immédiatement**
+
+Scénario : le mainteneur de `node:18-alpine` n'a pas encore publié de fix pour 3 CVE
+détectées par Trivy. La nouvelle version de l'image n'est attendue que dans 2 semaines.
+On ne peut pas attendre 2 semaines pour déployer.
+
+**Gestion en plusieurs niveaux** :
+
+1. **`ignore-unfixed: true`** — c'est l'option que j'ai mise dans le job security.
+   Concrètement : Trivy ignore les CVE pour lesquelles **aucun patch n'existe** dans la base
+   de données. Si la vulnérabilité est connue mais aucune version corrigée n'est dispo (dans
+   alpine ou dans le paquet upstream), Trivy ne la signale pas comme bloquante. C'est
+   pragmatique : il n'y a rien que le dev puisse faire à part attendre. Bloquer dessus, c'est
+   bloquer indéfiniment.
+
+2. **`.trivyignore`** (whitelisting explicite) — si une CVE *a* un fix dispo mais qu'on
+   décide consciemment de l'ignorer (ex: CVE qui ne s'applique pas à notre usage car nous
+   n'utilisons pas la fonction vulnérable), on l'ajoute dans un fichier `.trivyignore` à la
+   racine, avec un commentaire qui justifie. Exemple :
+
+   ```
+   # CVE-2024-1234 — vulnérabilité dans libxml2 qui n'est pas utilisée côté app
+   # Suivi : ticket SEC-456, ré-évaluation à chaque release alpine
+   CVE-2024-1234
+   ```
+
+   Trivy lit ce fichier et **n'arrête pas le pipeline** sur ces CVE listées. C'est traçable,
+   commitable, reviewable.
+
+3. **Pinning sur un digest** — pour avoir un comportement reproductible, on peut épingler
+   l'image de base sur son hash SHA256 : `FROM node:18-alpine@sha256:abc123…`. On contrôle
+   alors **exactement** quelle image on consomme, et le scan donne toujours le même
+   résultat. Quand la nouvelle version corrige les CVE, on met à jour le digest.
+
+4. **Stratégie produit** — communiquer à l'équipe et à la sécurité corporate que 3 CVE HIGH
+   non corrigibles sont tolérées temporairement, avec :
+   - le risque évalué (est-ce que les fonctions vulnérables sont effectivement appelées par
+     notre app ? souvent non, surtout pour les libs OS),
+   - une **date butoir** (rescanner dans 2 semaines, si toujours présent → escalade),
+   - une mention dans le risk register.
+
+5. **Bonus** — si on est vraiment paranoïaque : passer en `node:18-slim` (Debian-based) ou
+   `node:18-distroless` (Google distroless) qui ont parfois un cycle de patch différent.
+   Ou builder sa propre image de base minimaliste.
+
+L'idée fondamentale : **`exit-code: '1'` est strict, mais `ignore-unfixed` rend l'ensemble
+soutenable**. Sans ce filtre, on bloque pour des CVE qu'on ne peut littéralement pas
+corriger, ce qui rend le pipeline inutilisable et pousse l'équipe à désactiver Trivy (=
+pire situation).
 
 ---
 
