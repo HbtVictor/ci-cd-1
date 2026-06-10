@@ -13,16 +13,22 @@ env:
   RENDER_APP_URL: https://ci-cd-1-sjcw.onrender.com   # URL publique service Render (option B : 1 service partagé staging+prod)
 
 jobs:
-  # ─── JOB 1 : Lint ─────────────────────────────────
+  # ─── JOB 1 : Lint + npm audit ─────────────────────
   lint:
-    name: 🔍 Lint
+    name: 🔍 Lint + npm audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '18', cache: 'npm' }
       - run: npm ci
-      - run: npm run lint
+      - name: ESLint
+        run: npm run lint
+      # npm audit (TP8 - EX.2.1) : bloque le pipeline si HIGH ou CRITICAL
+      # détectée dans les dépendances de prod. --omit=dev exclut les
+      # devDependencies (jest, eslint) qui n'arrivent jamais en prod.
+      - name: npm audit (HIGH/CRITICAL bloquant)
+        run: npm audit --audit-level=high --omit=dev
 
   # ─── JOB 2 : Tests ────────────────────────────────
   test:
